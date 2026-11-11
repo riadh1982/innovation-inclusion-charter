@@ -15,22 +15,11 @@ MAXLEN = 1000
 app = FastAPI(title='ميثاق الابتكار من أجل الدمج', docs_url=None, redoc_url=None)
 app.mount('/assets', StaticFiles(directory=ROOT/'static'/'assets'), name='assets')
 
-def conn():
-    c = sqlite3.connect(DB, timeout=15)
-    c.row_factory = sqlite3.Row
-    c.execute('PRAGMA busy_timeout=15000')
-    return c
+from database import conn, initialize
 
 @app.on_event('startup')
 def start():
-    Path(DB).parent.mkdir(parents=True,exist_ok=True)
-    with conn() as c:
-        c.execute('PRAGMA journal_mode=WAL')
-        c.execute('CREATE TABLE IF NOT EXISTS signatures (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL, category TEXT NOT NULL, created TEXT NOT NULL, feedback TEXT DEFAULT NULL, idea TEXT DEFAULT NULL, feedback_status TEXT NOT NULL DEFAULT "none")')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_feedback ON signatures(feedback_status, id)')
-        columns={x[1] for x in c.execute('PRAGMA table_info(signatures)').fetchall()}
-        if 'publish_name' not in columns:
-            c.execute('ALTER TABLE signatures ADD COLUMN publish_name INTEGER NOT NULL DEFAULT 0')
+    initialize()
 
 class Sign(BaseModel):
     name: str = Field(min_length=2, max_length=100)
@@ -53,8 +42,8 @@ def home(): return (ROOT/'static'/'index.html').read_text(encoding='utf8')
 @app.get('/api/stats')
 def stats():
     with conn() as c:
-        count = c.execute('SELECT count(*) FROM signatures').fetchone()[0]
-        ideas = c.execute('SELECT count(*) FROM signatures WHERE feedback_status = "approved"').fetchone()[0]
+        count = c.execute('SELECT count(*) AS total FROM signatures').fetchone()['total']
+        ideas = c.execute("SELECT count(*) AS total FROM signatures WHERE feedback_status = 'approved'").fetchone()['total']
     return {'signatures':count,'ideas':ideas}
 
 @app.post('/api/sign')
@@ -82,7 +71,7 @@ def feedback(item:Feedback):
         r=c.execute('SELECT feedback_status FROM signatures WHERE code=?',(item.code,)).fetchone()
         if not r: raise HTTPException(404,'الشهادة غير موجودة')
         if r['feedback_status']!='none': raise HTTPException(409,'تم إرسال مشاركتك مسبقاً')
-        c.execute('UPDATE signatures SET feedback=?, idea=?, publish_name=?, feedback_status="pending" WHERE code=?',(item.opinion,idea,1 if item.publish_name else 0,item.code))
+        c.execute("UPDATE signatures SET feedback=?, idea=?, publish_name=?, feedback_status='pending' WHERE code=?",(item.opinion,idea,1 if item.publish_name else 0,item.code))
     return {'success':True,'message':'شكراً لك! وصلت فكرتك وستُنشر بعد المراجعة.'}
 
 @app.get('/api/certificate/{code}')
@@ -113,7 +102,7 @@ def qr(code:str,request:Request):
 @app.get('/api/ideas')
 def ideas():
     with conn() as c:
-        rows=c.execute('SELECT feedback,idea,CASE WHEN publish_name=1 THEN name ELSE NULL END AS name FROM signatures WHERE feedback_status="approved" ORDER BY id DESC LIMIT 30').fetchall()
+        rows=c.execute("SELECT feedback,idea,CASE WHEN publish_name=1 THEN name ELSE NULL END AS name FROM signatures WHERE feedback_status='approved' ORDER BY id DESC LIMIT 30").fetchall()
     return {'items':[dict(r) for r in rows]}
 
 def authorize(pin):
@@ -127,7 +116,7 @@ def admin_page():return (ROOT/'static'/'admin.html').read_text(encoding='utf8')
 def moderation(x_admin_pin: str=Header(default='')):
     authorize(x_admin_pin)
     with conn() as c:
-        rows=c.execute('SELECT id,code,name,publish_name,feedback,idea,created FROM signatures WHERE feedback_status="pending" ORDER BY id DESC LIMIT 200').fetchall()
+        rows=c.execute("SELECT id,code,name,publish_name,feedback,idea,created FROM signatures WHERE feedback_status='pending' ORDER BY id DESC LIMIT 200").fetchall()
     return {'items':[dict(x) for x in rows]}
 
 class Moderate(BaseModel):
@@ -138,7 +127,7 @@ def moderate(id:int,item:Moderate,x_admin_pin:str=Header(default='')):
     authorize(x_admin_pin)
     if item.status not in ('approved','rejected'):raise HTTPException(400,'حالة غير صحيحة')
     with conn() as c:
-        cur=c.execute('UPDATE signatures SET feedback_status=? WHERE id=? AND feedback_status="pending"',(item.status,id))
+        cur=c.execute("UPDATE signatures SET feedback_status=? WHERE id=? AND feedback_status='pending'",(item.status,id))
     return {'ok':cur.rowcount>0}
 
 @app.get('/health')
